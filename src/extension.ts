@@ -60,6 +60,13 @@ let disposing = false;
  */
 let inFlightConnect: Promise<boolean> | null = null;
 const attachedWindowIds = new Set<string>();
+/**
+ * Window creations of our own terminals that are in flight: each from before
+ * its `new-window` goes out until the window is in `attachedWindowIds` or the
+ * creation failed. `adoptAddedWindow()` waits for them, so that it never takes
+ * a window one of them is creating for another client's.
+ */
+const windowCreations = new Set<Promise<void>>();
 const terminalPtyByTerminal = new Map<vscode.Terminal, TmuxTerminal>();
 const pendingTerminalPtys: TmuxTerminal[] = [];
 let activeTmuxWindowId: string | null = null;
@@ -534,6 +541,11 @@ async function ensureClientConnectedImpl(startDirectory: string): Promise<boolea
             log(`window enumeration failed: ${err}`);
         }
     }
+    // A window added from here on becomes a tab as well; those that existed at
+    // connect are queued above.
+    client.on('window-add', (windowId: string) => {
+        void adoptAddedWindow(windowId);
+    });
     setStatus(`$(terminal) tmux-integrated: ${currentSessionName}`, tmuxVersion);
 
     // Tell tmux to use xterm-256color inside panes so that programs (less,
@@ -582,6 +594,17 @@ function buildTerminalOptions(
             onWindowDetached: (windowId) => {
                 attachedWindowIds.delete(windowId);
             },
+            onWindowCreating: () => {
+                let settle!: () => void;
+                const creation = new Promise<void>((resolve) => {
+                    settle = resolve;
+                });
+                windowCreations.add(creation);
+                return () => {
+                    windowCreations.delete(creation);
+                    settle();
+                };
+            },
         },
         () => disposing,
         log,
@@ -626,6 +649,46 @@ function adoptNextWindow(): AdoptableWindow | undefined {
         }
     }
     return undefined;
+}
+
+/**
+ * Give a window that was added while connected a tab, unless a terminal of
+ * ours has it: the window another tmux client created in the session (a
+ * script's `tmux new-window`, a plain `tmux attach` beside VS Code).
+ *
+ * tmux reports every added window alike, our own terminals' included, and
+ * such a report can be handled before that terminal has attached its window.
+ * Waiting for the creations in flight settles whose it is without a timer.
+ * The tab is created as at auto-connect, not shown, so it takes no focus.
+ */
+async function adoptAddedWindow(windowId: string): Promise<void> {
+    await Promise.all([...windowCreations]);
+    const isClaimed = () => attachedWindowIds.has(windowId)
+        || bootstrapWindow?.windowId === windowId
+        || windowsToAdopt.some(w => w.windowId === windowId);
+    const adoptingClient = client;
+    if (disposing || !adoptingClient?.isConnected() || isClaimed()) {
+        return;
+    }
+    let added;
+    try {
+        added = (await adoptingClient.listWindows()).find(w => w.id === windowId);
+    } catch (err) {
+        log(`window-add: could not list windows to adopt ${windowId}: ${err}`);
+        return;
+    }
+    // Closed again meanwhile, claimed meanwhile, or the connection was replaced.
+    if (!added || disposing || client !== adoptingClient || isClaimed()) {
+        return;
+    }
+    log(`window-add: adopting window ${windowId} ("${added.name}") created outside VS Code`);
+    vscode.window.createTerminal(buildTerminalOptions({
+        windowId: added.id,
+        paneId: added.paneId,
+        windowIndex: added.index,
+        name: added.name,
+        automaticRename: added.automaticRename,
+    }));
 }
 
 // ---------------------------------------------------------------------------

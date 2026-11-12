@@ -206,7 +206,15 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
         onWindowAttached?: (windowId: string) => void;
         onWindowDetached?: (windowId: string) => void;
         onWindowAttachFailed?: (windowId: string) => void;
+        /**
+         * Called before this terminal asks tmux for a new window; the
+         * function it returns is called once that window is attached
+         * (after `onWindowAttached`) or its creation failed.
+         */
+        onWindowCreating?: () => () => void;
     };
+    /** Ends the creation `onWindowCreating` announced; null when none is in flight. */
+    private settleWindowCreation: (() => void) | null = null;
     private attachedWindowNotified = false;
     private outputListener: ((ev: TmuxPaneOutput) => void) | null = null;
     private windowCloseListener: ((id: string) => void) | null = null;
@@ -273,6 +281,7 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
             onWindowAttached?: (windowId: string) => void;
             onWindowDetached?: (windowId: string) => void;
             onWindowAttachFailed?: (windowId: string) => void;
+            onWindowCreating?: () => () => void;
         },
         isDeactivating?: () => boolean,
         log?: (message: string) => void,
@@ -417,6 +426,10 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
                 this.log(`open(): reusing existing window ${targetWindow.windowId}`);
             } else {
                 this.log('open(): creating new tmux window...');
+                // Announced before new-window goes out: tmux's %window-add
+                // for this window can be handled before it is attached
+                // below, and must not be taken for another client's window.
+                this.settleWindowCreation = this.lifecycleHooks.onWindowCreating?.() ?? null;
                 const newWindowPromise = this.client.newWindow({
                     startDirectory: this.startDirectory,
                     cols: initialDimensions?.columns,
@@ -453,6 +466,7 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
             this.paneId = paneId;
             this.lifecycleHooks.onWindowAttached?.(windowId);
             this.attachedWindowNotified = true;
+            this.endWindowCreation();
 
             // Show the tab label before the first tmux round-trip. When a
             // window is adopted its name already came through with the
@@ -636,12 +650,19 @@ export class TmuxTerminal implements vscode.Pseudoterminal {
 
         } catch (err) {
             this.log(`open() ERROR: ${err}`);
+            this.endWindowCreation();
             if (this.existingWindow?.windowId) {
                 this.lifecycleHooks.onWindowAttachFailed?.(this.existingWindow.windowId);
             }
             this.writeEmitter.fire(`\r\ntmux-integrated: error creating tmux window: ${err}\r\n`);
             this.closeEmitter.fire(1);
         }
+    }
+
+    private endWindowCreation(): void {
+        const settle = this.settleWindowCreation;
+        this.settleWindowCreation = null;
+        settle?.();
     }
 
     /**

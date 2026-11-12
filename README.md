@@ -30,6 +30,9 @@ processes still alive.
   window.
 - **Explicit new window command** — **tmux: New tmux Terminal** always creates
   a fresh window in the session.
+- **Windows created elsewhere appear as tabs** — a window another tmux client
+  adds to the session (a script running `tmux new-window`, a `tmux attach`
+  beside VS Code) gets a tab of its own, without taking the focus.
 - **`code <file>` works** — the VS Code CLI socket is forwarded into every
   tmux window so the `code` command opens files in your running VS Code
   instance.

@@ -150,7 +150,7 @@ issue #33 (VS Code 1.129) was diagnosed.
 
 ## Where new terminal tabs come from
 
-There are three doorways into "create a VS Code terminal tab":
+These are the doorways into "create a VS Code terminal tab":
 
 1. **Profile provider** (`provideTerminalProfile`). Called by VS Code when a
    user opens a terminal that uses the `tmux-integrated` profile (including
@@ -166,6 +166,17 @@ There are three doorways into "create a VS Code terminal tab":
 4. **`autoConnectExistingSession()`**. After connect, iterates the
    `windowsToAdopt` snapshot and creates one VS Code terminal per remaining
    window via `vscode.window.createTerminal(buildTerminalOptions(w))`.
+5. **`adoptAddedWindow()`**, on tmux's `%window-add` while connected. A
+   window another tmux client creates in the session (a script's
+   `tmux new-window`, a plain `tmux attach` beside VS Code) gets a terminal
+   that adopts it, created like those of auto-connect and not shown, so it
+   takes no focus. tmux reports the windows our own terminals create in the
+   same way, and such a report can be handled before that terminal has
+   attached its window: `TmuxTerminal` announces a creation before it sends
+   `new-window` (`onWindowCreating`), and `adoptAddedWindow()` waits for the
+   creations in flight before it looks whether the window is claimed
+   (`attachedWindowIds`, `bootstrapWindow`, `windowsToAdopt`). No timer is
+   involved, so a slow link cannot produce a second tab for one window.
 
 In a **multi-root workspace**, paths that create a *genuinely new* tmux
 window (`provideTerminalProfile` falling through to `newWindow`, and the
